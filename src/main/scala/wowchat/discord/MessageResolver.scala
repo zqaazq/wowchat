@@ -6,7 +6,6 @@ import wowchat.common.{WowChatConfig, WowExpansion}
 import wowchat.game.GameResources
 
 import scala.collection.JavaConverters._
-import scala.util.control.Breaks.{break, breakable}
 
 object MessageResolver {
 
@@ -50,15 +49,16 @@ class MessageResolver(jda: JDA) {
     val pass1 = s"$hex(.*?)\\|r".r
     val pass2 = hex.r
 
-    pass2.replaceAllIn(pass1.replaceAllIn(message, _.group(1)), "")
+    pass2.replaceAllIn(pass1.replaceAllIn(message.replace("$", "\\$"), _.group(1)), "")
   }
 
   def resolveTags(discordChannel: TextChannel, message: String, onError: String => Unit): String = {
     // OR non-capturing regex didn't work for these for some reason
-    val regex1 = "\"@(.+?)\"".r
-    val regex2 = "@([^\\s]+)".r
+    val regexes = Seq("\"@(.+?)\"", "@([\\w]+)").map(_.r)
 
     val scalaMembers = discordChannel.getMembers.asScala
+      // you don't want to tag yourself
+      .filterNot(_.getUser.getIdLong == jda.getSelfUser.getIdLong)
     val effectiveNames = scalaMembers.map(member => {
       member.getEffectiveName -> member.getUser.getId
     })
@@ -71,58 +71,73 @@ class MessageResolver(jda: JDA) {
       .map(role => role.getName -> role.getId)
 
     // each group
-    Seq(regex1, regex2).foldLeft(message) {
+    regexes.foldLeft(message) {
       case (result, regex) =>
         regex.replaceAllIn(result, m => {
           val tag = m.group(1)
-          var success = ""
-          breakable {
-            Seq(effectiveNames, userNames, roleNames).foreach(members => {
-              if (resolveTagMatcher(members, tag, success = _, onError, members == roleNames)) {
-                break
+          val matches = Seq(effectiveNames, userNames, roleNames).foldLeft(Seq.empty[(String, String)]) {
+            case (result, members) =>
+              val resolvedTags = resolveTagMatcher(members, tag, members == roleNames)
+              if (result.isEmpty) {
+                resolvedTags
+              } else if (result.size == 1) {
+                // if one group hit a match, just use that as the best match.
+                result
               } else {
-                success = m.group(0)
+                result ++ resolvedTags
               }
-            })
           }
-          success
+
+          if (matches.size == 1) {
+            s"<@${matches.head._2}>"
+          } else if (matches.size > 1 && matches.size < 5) {
+            onError(s"Your tag @$tag matches multiple channel members: ${
+              matches.map(_._1).mkString(", ")
+            }. Be more specific in your tag!")
+            m.group(0)
+          } else if (matches.size >= 5) {
+            onError(s"Your tag @$tag matches too many channel members. Be more specific in your tag!")
+            m.group(0)
+          } else {
+            m.group(0)
+          }
         })
     }
   }
 
-  private def resolveTagMatcher(names: Seq[(String, String)], tag: String,
-                                onSuccess: String => Unit,
-                                onError: String => Unit, isRole: Boolean = false): Boolean = {
+  private def resolveTagMatcher(names: Seq[(String, String)], tag: String, isRole: Boolean): Seq[(String, String)] = {
     val lTag = tag.toLowerCase
     if (lTag == "here") {
-      return false
+      return Seq.empty
     }
 
     val matchesInitial = names
       .filter {
-        case (name, id) =>
+        case (name, _) =>
           name.toLowerCase.contains(lTag)
       }
 
-    val matches = if (matchesInitial.size > 1 && !lTag.contains(" ")) {
-      matchesInitial.filterNot {
-        case (name, _) => name.contains(" ")
-      }
+    (if (matchesInitial.size > 1 && !lTag.contains(" ")) {
+      // Multiple matches found. Prefer exact match first and a match where the tag is a whole word in the Discord name second.
+      matchesInitial.find {
+        case (name, _) => name.toLowerCase == lTag
+      }.fold({
+        // Exact match not found. Try to find the tag as a whole word within the name.
+        val namesWithMatchedWord = matchesInitial.filter {
+          case (name, _) => name.toLowerCase.split("\\W+").contains(lTag)
+        }
+        if (namesWithMatchedWord.nonEmpty) {
+          namesWithMatchedWord
+        } else {
+          matchesInitial
+        }
+      })(_ :: Nil)
     } else {
       matchesInitial
+    }).map {
+      case (name, id) =>
+        name -> (if (isRole) s"&$id" else id)
     }
-
-    if (matches.size == 1) {
-      onSuccess(s"<@${if (isRole) "&" else ""}${matches.head._2}>")
-    } else if (matches.size > 1 && matches.size < 5) {
-      onError(s"Your tag @$tag matches multiple channel members: ${
-        matches.map(_._1).mkString(", ")
-      }. Be more specific in your tag!")
-    } else if (matches.size >= 5) {
-      onError(s"Your tag @$tag matches too many channel members. Be more specific in your tag!")
-    }
-
-    matches.nonEmpty
   }
 
   def resolveEmojis(message: String): String = {

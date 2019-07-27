@@ -14,6 +14,7 @@ import net.dv8tion.jda.core.{AccountType, JDABuilder}
 import wowchat.game.GamePackets
 
 import scala.collection.JavaConverters._
+import scala.collection.mutable
 
 class Discord(discordConnectionCallback: CommonConnectionCallback) extends ListenerAdapter
   with GamePackets with StrictLogging {
@@ -47,13 +48,15 @@ class Discord(discordConnectionCallback: CommonConnectionCallback) extends Liste
 
       discordChannels.foreach {
         case (channel, channelConfig) =>
-
-          val parsedResolvedTags = from.map(from => {
-            messageResolver.resolveTags(channel, parsedLinks, error => {
-              Global.game.foreach(_.sendMessageToWow(ChatEvents.CHAT_MSG_WHISPER, error, Some(from)))
-            })
+          var errors = mutable.ArrayBuffer.empty[String]
+          val parsedResolvedTags = from.map(_ => {
+            messageResolver.resolveTags(channel, parsedLinks, errors += _)
           })
             .getOrElse(parsedLinks)
+            .replace("`", "\\`")
+            .replace("*", "\\*")
+            .replace("_", "\\_")
+            .replace("~", "\\~")
 
           val formatted = channelConfig
             .format
@@ -62,18 +65,28 @@ class Discord(discordConnectionCallback: CommonConnectionCallback) extends Liste
             .replace("%message", parsedResolvedTags)
             .replace("%target", wowChannel.getOrElse(""))
 
-          logger.info(s"WoW->Discord(${channel.getName}) $formatted")
-          channel.sendMessage(formatted).queue()
+          val filter = shouldFilter(channelConfig.filters, message)
+          logger.info(s"${if (filter) "FILTERED " else ""}WoW->Discord(${channel.getName}) $formatted")
+          if (!filter) {
+            channel.sendMessage(formatted).queue()
+          }
+          errors.foreach(error => {
+            Global.game.foreach(_.sendMessageToWow(ChatEvents.CHAT_MSG_WHISPER, error, from))
+            channel.sendMessage(error).queue()
+          })
       }
     })
   }
 
-  def sendGuildNotification(message: String): Unit = {
-    Global.wowToDiscord.get((ChatEvents.CHAT_MSG_GUILD, None))
-      .foreach(_.foreach {
-        case (channel, _) =>
-          logger.info(s"WoW->Discord(${channel.getName}) $message")
-          channel.sendMessage(message).queue()
+  def sendGuildNotification(eventKey: String, message: String): Unit = {
+    Global.guildEventsToDiscord
+      .getOrElse(eventKey, Global.wowToDiscord.getOrElse(
+          (ChatEvents.CHAT_MSG_GUILD, None), mutable.Set.empty
+        ).map(_._1)
+      )
+      .foreach(channel => {
+        logger.info(s"WoW->Discord(${channel.getName}) $message")
+        channel.sendMessage(message).queue()
       })
   }
 
@@ -105,6 +118,7 @@ class Discord(discordConnectionCallback: CommonConnectionCallback) extends Liste
         // to use the previous connection's channel references. I guess need to refill these maps on discord reconnection
         Global.discordToWow.clear
         Global.wowToDiscord.clear
+        Global.guildEventsToDiscord.clear
 
         // getNext seq of needed channels from config
         val configChannels = Global.config.channels.map(channelConfig => {
@@ -112,7 +126,8 @@ class Discord(discordConnectionCallback: CommonConnectionCallback) extends Liste
         })
         val configChannelsNames = configChannels.map(_._1)
 
-        val eligibleDiscordChannels = event.getEntity.getTextChannels.asScala
+        val discordTextChannels = event.getEntity.getTextChannels.asScala
+        val eligibleDiscordChannels = discordTextChannels
           .filter(channel =>
             configChannelsNames.contains(channel.getName.toLowerCase) ||
             configChannelsNames.contains(channel.getId)
@@ -144,6 +159,30 @@ class Discord(discordConnectionCallback: CommonConnectionCallback) extends Liste
                 }
             }
           })
+
+        // build guild notification maps
+        val guildEventChannels = Global.config.guildConfig.notificationConfigs
+          .filter {
+            case (key, notificationConfig) =>
+              notificationConfig.enabled
+          }
+          .flatMap {
+            case (key, notificationConfig) =>
+              notificationConfig.channel.fold[Option[(String, String)]](None)(channel => Some(channel -> key))
+          }
+
+        discordTextChannels.foreach(channel => {
+          guildEventChannels
+            .filter {
+              case (name, _) =>
+                name.equalsIgnoreCase(channel.getName) ||
+                name == channel.getId
+            }
+            .foreach {
+              case (_, notificationKey) =>
+                Global.guildEventsToDiscord.addBinding(notificationKey, channel)
+            }
+        })
 
         if (Global.discordToWow.nonEmpty || Global.wowToDiscord.nonEmpty) {
           if (firstConnect) {
@@ -193,23 +232,59 @@ class Discord(discordConnectionCallback: CommonConnectionCallback) extends Liste
         .get(channelName)
         .fold(Global.discordToWow.get(channelId))(Some(_))
         .foreach(_.foreach(channelConfig => {
-            val finalMessage = if (Global.config.discord.enableDotCommands && message.startsWith(".")) {
-              message
-            } else {
-              channelConfig.format
-                .replace("%time", Global.getTime)
-                .replace("%user", effectiveName)
-                .replace("%message", message)
-            }
+          val finalMessage = if (shouldSendDirectly(message)) {
+            message
+          } else {
+            val formatted = channelConfig.format
+              .replace("%time", Global.getTime)
+              .replace("%user", effectiveName)
+              .replace("%message", message)
 
-            logger.info(s"Discord->WoW(${
-              channelConfig.channel.getOrElse(ChatEvents.valueOf(channelConfig.tp))
-            }) [$effectiveName]: $message")
+            // If the final formatted message is a dot command, it should be disabled. Add a space in front.
+            if (formatted.startsWith(".")) {
+              s" $formatted"
+            } else {
+              formatted
+            }
+          }
+
+          val filter = shouldFilter(channelConfig.filters, message)
+          logger.info(s"${if (filter) "FILTERED " else ""}Discord->WoW(${
+            channelConfig.channel.getOrElse(ChatEvents.valueOf(channelConfig.tp))
+          }) [$effectiveName]: $message")
+          if (!filter) {
             Global.game.fold(logger.error("Cannot send message! Not connected to WoW!"))(handler => {
               handler.sendMessageToWow(channelConfig.tp, finalMessage, channelConfig.channel)
             })
+          }
         }))
     }
+  }
+
+  def shouldSendDirectly(message: String): Boolean = {
+    val discordConf = Global.config.discord
+    val trimmed = message.drop(1).toLowerCase
+
+    message.startsWith(".") &&
+    discordConf.enableDotCommands &&
+      (
+        discordConf.dotCommandsWhitelist.isEmpty ||
+        discordConf.dotCommandsWhitelist.contains(trimmed) ||
+        // Theoretically it would be better to construct a prefix tree for this.
+        !discordConf.dotCommandsWhitelist.forall(item => {
+          if (item.endsWith("*")) {
+            !trimmed.startsWith(item.dropRight(1).toLowerCase)
+          } else {
+            true
+          }
+        })
+      )
+  }
+
+  def shouldFilter(filtersConfig: Option[FiltersConfig], message: String): Boolean = {
+    filtersConfig
+      .fold(Global.config.filters)(Some(_))
+      .exists(filters => filters.enabled && filters.patterns.exists(message.matches))
   }
 
   def sanitizeMessage(message: String): String = {

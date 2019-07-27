@@ -11,15 +11,16 @@ import wowchat.game.GamePackets
 import scala.collection.JavaConverters._
 import scala.reflect.runtime.universe.{TypeTag, typeOf}
 
-case class WowChatConfig(discord: DiscordConfig, wow: Wow, guildConfig: GuildConfig, channels: Seq[ChannelConfig])
-case class DiscordConfig(token: String, enableDotCommands: Boolean, enableCommandsChannels: Set[String])
+case class WowChatConfig(discord: DiscordConfig, wow: Wow, guildConfig: GuildConfig, channels: Seq[ChannelConfig], filters: Option[FiltersConfig])
+case class DiscordConfig(token: String, enableDotCommands: Boolean, dotCommandsWhitelist: Set[String], enableCommandsChannels: Set[String])
 case class Wow(platform: Platform.Value, build: Option[Int], realmlist: RealmListConfig, account: String, password: String, character: String, enableServerMotd: Boolean)
 case class RealmListConfig(name: String, host: String, port: Int)
 case class GuildConfig(notificationConfigs: Map[String, GuildNotificationConfig])
-case class GuildNotificationConfig(enabled: Boolean, format: String)
+case class GuildNotificationConfig(enabled: Boolean, format: String, channel: Option[String])
 case class ChannelConfig(chatDirection: ChatDirection, wow: WowChannelConfig, discord: DiscordChannelConfig)
-case class WowChannelConfig(tp: Byte, channel: Option[String] = None, format: String)
-case class DiscordChannelConfig(channel: String, format: String)
+case class WowChannelConfig(tp: Byte, channel: Option[String] = None, format: String, filters: Option[FiltersConfig])
+case class DiscordChannelConfig(channel: String, format: String, filters: Option[FiltersConfig])
+case class FiltersConfig(enabled: Boolean, patterns: Seq[String])
 
 object WowChatConfig extends GamePackets {
 
@@ -28,20 +29,17 @@ object WowChatConfig extends GamePackets {
 
   def apply(confFile: String): WowChatConfig = {
     val file = new File(confFile)
-    val config = if (file.exists) {
+    val config = (if (file.exists) {
       ConfigFactory.parseFile(file)
     } else {
       ConfigFactory.load(confFile)
-    }
+    }).resolve
 
     val discordConf = config.getConfig("discord")
     val wowConf = config.getConfig("wow")
-    val guildConf = if (config.hasPath("guild")) {
-      Some(config.getConfig("guild"))
-    } else {
-      None
-    }
+    val guildConf = getConfigOpt(config, "guild")
     val channelsConf = config.getConfig("chat")
+    val filtersConf = getConfigOpt(config, "filters")
 
     // we gotta load this first to initialize constants that change between versions :OMEGALUL:
     version = getOpt(wowConf, "version").getOrElse("1.12.1")
@@ -51,6 +49,8 @@ object WowChatConfig extends GamePackets {
       DiscordConfig(
         discordConf.getString("token"),
         getOpt[Boolean](discordConf, "enable_dot_commands").getOrElse(true),
+        getOpt[util.List[String]](discordConf, "dot_commands_whitelist")
+          .getOrElse(new util.ArrayList[String]()).asScala.map(_.toLowerCase).toSet,
         getOpt[util.List[String]](discordConf, "enable_commands_channels")
           .getOrElse(new util.ArrayList[String]()).asScala.map(_.toLowerCase).toSet
       ),
@@ -64,7 +64,8 @@ object WowChatConfig extends GamePackets {
         getOpt[Boolean](wowConf, "enable_server_motd").getOrElse(true)
       ),
       parseGuildConfig(guildConf),
-      parseChannels(channelsConf)
+      parseChannels(channelsConf),
+      parseFilters(filtersConf)
     )
   }
 
@@ -118,17 +119,18 @@ object WowChatConfig extends GamePackets {
 
     guildConf.fold({
       GuildConfig(defaults.mapValues {
-        case (enabled, format) => GuildNotificationConfig(enabled, format)
+        case (enabled, format) => GuildNotificationConfig(enabled, format, None)
       })
     })(guildConf => {
       GuildConfig(
         defaults.keysIterator.map(key => {
           val conf = getConfigOpt(guildConf, key)
           val default = defaults(key)
-          key -> conf.fold(GuildNotificationConfig(default._1, default._2))(conf => {
+          key -> conf.fold(GuildNotificationConfig(default._1, default._2, None))(conf => {
             GuildNotificationConfig(
               getOpt[Boolean](conf, "enabled").getOrElse(default._1),
-              getOpt[String](conf, "format").getOrElse(default._2)
+              getOpt[String](conf, "format").getOrElse(default._2),
+              getOpt[String](conf, "channel")
             )
           })
         })
@@ -145,9 +147,27 @@ object WowChatConfig extends GamePackets {
 
         ChannelConfig(
           ChatDirection.withName(channel.getString("direction")),
-          WowChannelConfig(ChatEvents.parse(channel.getString("wow.type")), wowChannel, getOpt[String](channel, "wow.format").getOrElse("")),
-          DiscordChannelConfig(channel.getString("discord.channel"), channel.getString("discord.format"))
+          WowChannelConfig(
+            ChatEvents.parse(channel.getString("wow.type")),
+            wowChannel,
+            getOpt[String](channel, "wow.format").getOrElse(""),
+            parseFilters(getConfigOpt(channel, "wow.filters"))
+          ),
+          DiscordChannelConfig(
+            channel.getString("discord.channel"),
+            channel.getString("discord.format"),
+            parseFilters(getConfigOpt(channel, "discord.filters"))
+          )
         )
+    })
+  }
+
+  private def parseFilters(filtersConf: Option[Config]): Option[FiltersConfig] = {
+    filtersConf.map(config => {
+      FiltersConfig(
+        getOpt[Boolean](config, "enabled").getOrElse(false),
+        getOpt[util.List[String]](config, "patterns").getOrElse(new util.ArrayList[String]()).asScala
+      )
     })
   }
 
@@ -168,6 +188,8 @@ object WowChatConfig extends GamePackets {
             case "true" | "1" | "y" | "yes" => true
             case _ => false
           }
+        } else if (typeOf[T] =:= typeOf[String]) {
+          cfg.getString(path)
         } else {
           cfg.getAnyRef(path)
         }).asInstanceOf[T]

@@ -1,6 +1,5 @@
 package wowchat.game
 
-import java.lang.management.ManagementFactory
 import java.nio.charset.Charset
 
 import io.netty.buffer.{ByteBuf, PooledByteBufAllocator}
@@ -22,6 +21,8 @@ class GamePacketHandlerTBC(realmId: Int, realmName: String, sessionKey: Array[By
     0x98, 0x18, 0xC5, 0x36, 0xCA, 0xE8, 0x81, 0x61, 0x42, 0xF9, 0xEB, 0x07, 0x63, 0xAB, 0x8B, 0xEC
   ).map(_.toByte)
 
+  private val connectTime = System.currentTimeMillis
+
   override protected def channelParse(msg: Packet): Unit = {
     msg.id match {
       case SMSG_GM_MESSAGECHAT => handle_SMSG_MESSAGECHAT(msg)
@@ -32,6 +33,7 @@ class GamePacketHandlerTBC(realmId: Int, realmName: String, sessionKey: Array[By
   }
 
   override protected def parseCharEnum(msg: Packet): Option[CharEnumMessage] = {
+    val characterBytes = Global.config.wow.character.toLowerCase.getBytes("UTF-8")
     val charactersNum = msg.byteBuf.readByte
 
     // only care about guid and name here
@@ -54,7 +56,7 @@ class GamePacketHandlerTBC(realmId: Int, realmName: String, sessionKey: Array[By
       msg.byteBuf.skipBytes(12) // x + y + z
 
       val guildGuid = msg.byteBuf.readIntLE
-      if (name.equalsIgnoreCase(Global.config.wow.character)) {
+      if (name.toLowerCase.getBytes("UTF-8").sameElements(characterBytes)) {
         return Some(CharEnumMessage(name, guid, race, guildGuid))
       }
 
@@ -76,9 +78,9 @@ class GamePacketHandlerTBC(realmId: Int, realmName: String, sessionKey: Array[By
       return None
     }
 
-    // ignore messages from itself
+    // ignore messages from itself, unless it is a system message.
     val guid = msg.byteBuf.readLongLE
-    if (guid == selfCharacterId.get) {
+    if (tp != ChatEvents.CHAT_MSG_SYSTEM && guid == selfCharacterId.get) {
       return None
     }
 
@@ -120,7 +122,7 @@ class GamePacketHandlerTBC(realmId: Int, realmName: String, sessionKey: Array[By
 
   override protected def parseGuildRoster(msg: Packet): Map[Long, GuildMember] = {
     val count = msg.byteBuf.readIntLE
-    val motd = msg.readString
+    guildMotd = Some(msg.readString)
     val ginfo = msg.readString
     val rankscount = msg.byteBuf.readIntLE
     (0 until rankscount).foreach(i => {
@@ -155,14 +157,12 @@ class GamePacketHandlerTBC(realmId: Int, realmName: String, sessionKey: Array[By
   }
 
   private def handle_SMSG_TIME_SYNC_REQ(msg: Packet): Unit = {
-    // jvm uptime should work for this?
-    val jvmUptime = ManagementFactory.getRuntimeMXBean.getUptime
-
     val counter = msg.byteBuf.readIntLE
+    val uptime = (System.currentTimeMillis - connectTime).toInt
 
     val byteBuf = PooledByteBufAllocator.DEFAULT.buffer(8, 8)
     byteBuf.writeIntLE(counter)
-    byteBuf.writeIntLE(jvmUptime.toInt)
+    byteBuf.writeIntLE(uptime)
 
     ctx.get.writeAndFlush(Packet(CMSG_TIME_SYNC_RESP, byteBuf))
   }

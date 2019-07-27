@@ -1,3 +1,29 @@
+2019-06-01 - v1.3.2
++ Improved Discord tag matching heuristics:
+  + If multiple matches are found, preferred matches are chosen if the match is exact, or if the match contains the tag as an independent word.
+  + If a picked match cannot be found, the bot will send the message as is without resolving the tag.
+    In addition to whispering the sender, it will also write the error into the Discord channel, since a lot of servers block
+    level 1 characters from whispering.
+* Fixed bot breaking on WotLK/Cata when receiving very large responses such as the guild roster for a 900+ member guild.
+* Fixed incorrect application of escaping markdown before applying config-based message formatting.
+
+2019-04-24 - v1.3.1
++ Improve who command handling to better return approximate results from a mix of offline guild members and online players.
++ Improve matching of tags in WoW->Discord messages to tag users even if their name is followed by special characters.
++ Enabled escaping of characters in WoW->Discord messages that would format the message on Discord.
+* Fixed issue with some servers not sending back character list in case it is requested before anti cheat response.
+
+2019-03-20 - v1.3.0
++ Added support for global and channel-bound chat filters using Java Regex pattern matching.
++ Added whitelist feature to optionally explicitly only allow users using certain dot commands.
++ Added support for restart/shutdown announcement messages to be relayed as System messages.
++ Added command ?gmotd to display your guild's motd.
++ Added option to send guild notifications and guild motd to another Discord channel.
++ Changed behavior of ?who command to always return exact player requested if available on queries returning multiple players.
+* Fixed bug in ?who command not working if the server returns a different player count vs the number of players actually displayed.
+* Fixed bug in displaying color coded messages if the message contains the $ symbol.
+* Fixed rare sync bug on some servers if the server + bot are both running for longer than 24 days.
+
 2019-02-14 - v1.2.10
 + Enabled parsing of attachment (image links) in Discord->WoW messages
 + Added configuration setting for ingoring server MotD.

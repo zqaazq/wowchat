@@ -107,6 +107,7 @@ class GamePacketHandlerCataclysm15595(realmId: Int, realmName: String, sessionKe
   }
 
   override protected def parseCharEnum(msg: Packet): Option[CharEnumMessage] = {
+    val characterBytes = Global.config.wow.character.toLowerCase.getBytes("UTF-8")
     msg.readBits(24) // unkn
     val charactersNum = msg.readBits(17)
 
@@ -160,7 +161,7 @@ class GamePacketHandlerCataclysm15595(realmId: Int, realmName: String, sessionKe
       msg.readXorByteSeq(guildGuids(i), 4, 0)
       msg.readXorByteSeq(guids(i), 5, 1)
 
-      if (name.equalsIgnoreCase(Global.config.wow.character)) {
+      if (name.toLowerCase.getBytes("UTF-8").sameElements(characterBytes)) {
         return Some(CharEnumMessage(name, ByteUtils.bytesToLongLE(guids(i)), race, ByteUtils.bytesToLongLE(guildGuids(i))))
       }
 
@@ -228,7 +229,7 @@ class GamePacketHandlerCataclysm15595(realmId: Int, realmName: String, sessionKe
 
     val gInfoLength = msg.readBits(12)
 
-    (0 until count).map(i => {
+    val guildRosterMap = (0 until count).map(i => {
       val charClass = msg.byteBuf.readByte
       msg.byteBuf.skipBytes(4) // unkn
       msg.readXorByteSeq(guids(i), 0)
@@ -254,6 +255,11 @@ class GamePacketHandlerCataclysm15595(realmId: Int, realmName: String, sessionKe
 
       ByteUtils.bytesToLongLE(guids(i)) -> GuildMember(name, isOnline, charClass, level, zoneId, lastLogoff)
     }).toMap
+
+    msg.byteBuf.skipBytes(gInfoLength)
+    guildMotd = Some(msg.byteBuf.readCharSequence(motdLength, Charset.forName("UTF-8")).toString)
+
+    guildRosterMap
   }
 
   override protected def parseNotification(msg: Packet): String = {

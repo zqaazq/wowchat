@@ -5,29 +5,13 @@ import java.util.zip.Inflater
 import io.netty.buffer.{ByteBuf, PooledByteBufAllocator}
 import io.netty.channel.ChannelHandlerContext
 
-class GamePacketDecoderCataclysm extends GamePacketDecoder with GamePacketsCataclysm15595 {
+class GamePacketDecoderCataclysm extends GamePacketDecoderWotLK with GamePacketsCataclysm15595 {
 
   protected val inflater: Inflater = new Inflater
 
   override def channelInactive(ctx: ChannelHandlerContext): Unit = {
     inflater.end()
     super.channelInactive(ctx)
-  }
-
-  override def parseGameHeaderEncrypted(in: ByteBuf, crypt: GameHeaderCrypt): (Int, Int) = {
-    val header = new Array[Byte](HEADER_LENGTH)
-    in.readBytes(header)
-    val decrypted = crypt.decrypt(header)
-    if ((decrypted.head & 0x80) == 0x80) {
-      val nextByte = crypt.decrypt(Array(in.readByte)).head
-      val size = ((decrypted(0) & 0x7F) << 16) | ((decrypted(1) & 0xFF) << 8) | (decrypted(2) & 0xFF)
-      val id = (nextByte & 0xFF) << 8 | decrypted(3) & 0xFF
-      (id, size)
-    } else {
-      val size = ((decrypted(0) & 0xFF) << 8 | decrypted(1) & 0xFF) - 2
-      val id = (decrypted(3) & 0xFF) << 8 | decrypted(2) & 0xFF
-      (id, size)
-    }
   }
 
   override def decompress(id: Int, byteBuf: ByteBuf): (Int, ByteBuf) = {

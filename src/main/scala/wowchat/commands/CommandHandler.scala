@@ -22,51 +22,60 @@ object CommandHandler extends StrictLogging {
   var whoRequest: WhoRequest = _
 
   // returns back the message as an option if unhandled
+  // needs to be refactored into a Map[String, <Intelligent Command Handler Function>]
   def apply(fromChannel: MessageChannel, message: String): Boolean = {
     if (!message.startsWith(trigger)) {
       return false
     }
 
-    Global.game.fold({
-      fromChannel.sendMessage(NOT_ONLINE).queue()
-      true
-    })(game => {
-      val splt = message.substring(trigger.length).split(" ")
-      val possibleCommand = splt(0).toLowerCase
-      val arguments = if (splt.length > 1 && splt(1).length <= 16) Some(splt(1)) else None
+    val splt = message.substring(trigger.length).split(" ")
+    val possibleCommand = splt(0).toLowerCase
+    val arguments = if (splt.length > 1 && splt(1).length <= 16) Some(splt(1)) else None
 
-      Try {
-        possibleCommand match {
-          case "who" | "online" =>
+    Try {
+      possibleCommand match {
+        case "who" | "online" =>
+          Global.game.fold({
+            fromChannel.sendMessage(NOT_ONLINE).queue()
+            return true
+          })(game => {
             val whoSucceeded = game.handleWho(arguments)
             if (arguments.isDefined) {
               whoRequest = WhoRequest(fromChannel, arguments.get)
             }
             whoSucceeded
-        }
-      }.fold(throwable => {
-        // command not found, should send to wow chat
-        false
-      }, opt => {
-        // command found, do not send to wow chat
-        if (opt.isDefined) {
-          fromChannel.sendMessage(opt.get).queue()
-        }
-        true
-      })
+          })
+        case "gmotd" =>
+          Global.game.fold({
+            fromChannel.sendMessage(NOT_ONLINE).queue()
+            return true
+          })(_.handleGmotd())
+      }
+    }.fold(throwable => {
+      // command not found, should send to wow chat
+      false
+    }, opt => {
+      // command found, do not send to wow chat
+      if (opt.isDefined) {
+        fromChannel.sendMessage(opt.get).queue()
+      }
+      true
     })
   }
 
   // eww
-  def handleWhoResponse(whoResponse: Option[WhoResponse], guildInfo: GuildInfo, guildRoster: mutable.Map[Long, GuildMember]) = {
-    val response = whoResponse.map(r => {
-      s"${r.playerName} ${if (r.guildName.nonEmpty) s"<${r.guildName}> " else ""}is a level ${r.lvl}${r.gender.fold(" ")(g => s" $g ")}${r.race} ${r.cls} currently in ${r.zone}."
+  def handleWhoResponse(whoResponse: Option[WhoResponse],
+                        guildInfo: GuildInfo,
+                        guildRoster: mutable.Map[Long, GuildMember],
+                        guildRosterMatcherFunc: GuildMember => Boolean): Iterable[String] = {
+    whoResponse.map(r => {
+      Seq(s"${r.playerName} ${if (r.guildName.nonEmpty) s"<${r.guildName}> " else ""}is a level ${r.lvl}${r.gender.fold(" ")(g => s" $g ")}${r.race} ${r.cls} currently in ${r.zone}.")
     }).getOrElse({
       // Check guild roster
       guildRoster
         .values
-        .find(_.name.equalsIgnoreCase(whoRequest.playerName))
-        .fold(s"No player named ${whoRequest.playerName} is currently playing.")(guildMember => {
+        .filter(guildRosterMatcherFunc)
+        .map(guildMember => {
           val cls = new GamePackets{}.Classes.valueOf(guildMember.charClass) // ... should really move that out
           val days = guildMember.lastLogoff.toInt
           val hours = ((guildMember.lastLogoff * 24) % 24).toInt
@@ -88,6 +97,5 @@ object CommandHandler extends StrictLogging {
             s"Last seen$daysStr$hoursStr$minutesStr ago in ${GameResources.AREA.getOrElse(guildMember.zoneId, "Unknown Zone")}."
         })
     })
-    whoRequest.messageChannel.sendMessage(response).queue()
   }
 }

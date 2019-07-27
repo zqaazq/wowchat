@@ -162,20 +162,19 @@ class GamePacketHandlerMoP18414(realmId: Int, realmName: String, sessionKey: Arr
     byteBuf.writeBytes(name.getBytes("UTF-8"))
   }
 
-  override protected def handle_SMSG_WHO(msg: Packet): Unit = {
+  override protected def parseWhoResponse(msg: Packet): Seq[WhoResponse] = {
     val displayCount = msg.readBits(6)
 
     if (displayCount == 0) {
-      CommandHandler.handleWhoResponse(None, guildInfo, guildRoster)
+      Seq.empty
     } else {
-      val fetchCount = Math.min(displayCount, 3)
-      val accountId = new Array[Array[Byte]](fetchCount)
-      val playerGuid = new Array[Array[Byte]](fetchCount)
-      val guildGuid = new Array[Array[Byte]](fetchCount)
-      val guildNameLengths = new Array[Int](fetchCount)
-      val playerNameLengths = new Array[Int](fetchCount)
+      val accountId = new Array[Array[Byte]](displayCount)
+      val playerGuid = new Array[Array[Byte]](displayCount)
+      val guildGuid = new Array[Array[Byte]](displayCount)
+      val guildNameLengths = new Array[Int](displayCount)
+      val playerNameLengths = new Array[Int](displayCount)
 
-      (0 until fetchCount).foreach(i => {
+      (0 until displayCount).foreach(i => {
         accountId(i) = new Array[Byte](8)
         playerGuid(i) = new Array[Byte](8)
         guildGuid(i) = new Array[Byte](8)
@@ -208,10 +207,7 @@ class GamePacketHandlerMoP18414(realmId: Int, realmName: String, sessionKey: Arr
         playerNameLengths(i) = msg.readBits(6)
       })
 
-      // skip rest
-      (fetchCount until displayCount).foreach(i => msg.readBits(74))
-
-      (0 until fetchCount).foreach(i => {
+      (0 until displayCount).map(i => {
         msg.readXorByteSeq(playerGuid(i), 1)
         msg.byteBuf.skipBytes(4) // realm id
         msg.readXorByteSeq(playerGuid(i), 7)
@@ -244,15 +240,14 @@ class GamePacketHandlerMoP18414(realmId: Int, realmName: String, sessionKey: Arr
         val lvl = msg.byteBuf.readByte
         val zone = msg.byteBuf.readIntLE
 
-        CommandHandler.handleWhoResponse(Some(WhoResponse(
+        WhoResponse(
           playerName,
           guildName,
           lvl,
           cls,
           race,
           gender,
-          GameResources.AREA.getOrElse(zone, "Unknown Zone"))),
-          guildInfo, guildRoster
+          GameResources.AREA.getOrElse(zone, "Unknown Zone")
         )
       })
     }
@@ -319,6 +314,7 @@ class GamePacketHandlerMoP18414(realmId: Int, realmName: String, sessionKey: Arr
   }
 
   override protected def parseCharEnum(msg: Packet): Option[CharEnumMessage] = {
+    val characterBytes = Global.config.wow.character.toLowerCase.getBytes("UTF-8")
     msg.readBits(21) // unkn
     val charactersNum = msg.readBits(16)
 
@@ -376,7 +372,7 @@ class GamePacketHandlerMoP18414(realmId: Int, realmName: String, sessionKey: Arr
       msg.readXorByteSeq(guildGuids(i), 7)
       msg.byteBuf.skipBytes(4) // z
 
-      if (name.equalsIgnoreCase(Global.config.wow.character)) {
+      if (name.toLowerCase.getBytes("UTF-8").sameElements(characterBytes)) {
         return Some(CharEnumMessage(name, ByteUtils.bytesToLongLE(guids(i)), race, ByteUtils.bytesToLongLE(guildGuids(i))))
       }
     })
@@ -550,12 +546,12 @@ class GamePacketHandlerMoP18414(realmId: Int, realmName: String, sessionKey: Arr
 
     msg.readXorByteSeq(senderGuid, 4, 7, 1, 5, 0, 6, 2, 3)
 
-    // ignore messages from itself
-    if (ByteUtils.bytesToLongLE(senderGuid) == selfCharacterId.get) {
+    val tp = msg.byteBuf.readByte
+
+    // ignore messages from itself, unless it is a system message.
+    if (tp != ChatEvents.CHAT_MSG_SYSTEM && ByteUtils.bytesToLongLE(senderGuid) == selfCharacterId.get) {
       return None
     }
-
-    val tp = msg.byteBuf.readByte
 
     // ignore if from an unhandled channel - unless it is a guild achievement message
     if (tp != ChatEvents.CHAT_MSG_GUILD_ACHIEVEMENT && !Global.wowToDiscord.contains((tp, channelName.map(_.toLowerCase)))) {
@@ -636,7 +632,7 @@ class GamePacketHandlerMoP18414(realmId: Int, realmName: String, sessionKey: Arr
 
     val gInfoLength = msg.readBits(11)
 
-    (0 until count).map(i => {
+    val guildRosterMap = (0 until count).map(i => {
       val charClass = msg.byteBuf.readByte
       msg.byteBuf.skipBytes(4) // total reputation
       val name = msg.byteBuf.readCharSequence(nameLengths(i), Charset.forName("UTF-8")).toString
@@ -663,6 +659,14 @@ class GamePacketHandlerMoP18414(realmId: Int, realmName: String, sessionKey: Arr
 
       ByteUtils.bytesToLongLE(guids(i)) -> GuildMember(name, isOnline, charClass, level, zoneId, lastLogoff)
     }).toMap
+
+    msg.byteBuf.skipBytes(4) // accounts number
+    msg.byteBuf.skipBytes(4) // created date
+    msg.byteBuf.skipBytes(gInfoLength)
+    msg.byteBuf.skipBytes(4) // weekly rep cap
+    guildMotd = Some(msg.byteBuf.readCharSequence(motdLength, Charset.forName("UTF-8")).toString)
+
+    guildRosterMap
   }
 
   override protected def parseNotification(msg: Packet): String = {
